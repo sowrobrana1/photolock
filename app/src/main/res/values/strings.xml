@@ -1,25 +1,93 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">PhotoLock</string>
+    <string name="app_version">0.2.0</string>
+
+    <!-- Common actions -->
+    <string name="action_back">Back</string>
+    <string name="action_cancel">Cancel</string>
+    <string name="action_create">Create</string>
+    <string name="action_save">Save</string>
+    <string name="action_delete">Delete</string>
+    <string name="action_next">Next</string>
+    <string name="action_ok">OK</string>
 
     <!-- Lock screen -->
     <string name="lock_title">PhotoLock</string>
     <string name="lock_enter_pin">Enter your PIN</string>
+    <string name="lock_create_pin">Create a PIN for your vault</string>
+    <string name="lock_confirm_pin">Re-enter your PIN to confirm</string>
     <string name="lock_use_biometric">Use fingerprint</string>
+    <string name="lock_use_pin">Use PIN</string>
     <string name="lock_delete_digit">Delete</string>
+    <string name="lock_wrong_pin">Wrong PIN</string>
+    <string name="lock_pin_mismatch">PINs didn\'t match — create your PIN again</string>
+    <string name="lock_lockout">Too many attempts. Try again in %1$d s</string>
+    <string name="lock_use_6_digit">Use a 6-digit PIN</string>
+    <string name="lock_use_4_digit">Use a 4-digit PIN</string>
+    <string name="biometric_title">Unlock PhotoLock</string>
+    <string name="biometric_subtitle">Confirm it\'s you to open your vault</string>
 
     <!-- Vault -->
     <string name="vault_title">My Vault</string>
     <string name="vault_empty_title">Your vault is empty</string>
+    <string name="vault_empty_folder_title">Nothing here yet</string>
     <string name="vault_empty_body">Tap + to import photos and videos from your gallery. They stay encrypted on this device only.</string>
     <string name="vault_import">Import</string>
+    <string name="vault_all">All</string>
+    <string name="vault_root">Vault root</string>
+    <string name="vault_selected_count">%1$d selected</string>
+    <string name="vault_export">Export to gallery</string>
+    <string name="vault_move_to">Move to…</string>
+    <string name="vault_delete_items_title">Delete from vault?</string>
+    <string name="vault_delete_items_body">%1$d item(s) will be permanently deleted from the vault. Exported copies in your gallery are not affected.</string>
+    <string name="vault_remove_originals_title">Remove originals from gallery?</string>
+    <string name="vault_remove_originals_body">%1$d item(s) are safely encrypted in your vault. You can move the originals to the system trash (recoverable for 30 days). PhotoLock never deletes anything without this system confirmation.</string>
+    <string name="vault_remove_originals_yes">Remove originals</string>
+    <string name="vault_remove_originals_no">Keep originals</string>
+
+    <!-- Folders -->
+    <string name="folder_new">New folder</string>
+    <string name="folder_new_short">New</string>
+    <string name="folder_name">Folder name</string>
+    <string name="folder_rename">Rename</string>
+    <string name="folder_delete">Delete folder</string>
+    <string name="folder_manage_hint">Deleting a folder moves its items back to the vault root — the items themselves are kept.</string>
+
+    <!-- Viewer -->
+    <string name="viewer_delete_title">Delete from vault?</string>
+    <string name="viewer_delete_body">This item will be permanently deleted from the vault.</string>
 
     <!-- Settings -->
     <string name="settings_title">Settings</string>
     <string name="settings_change_pin">Change PIN</string>
+    <string name="settings_change_pin_summary">Currently a %1$d-digit PIN</string>
     <string name="settings_biometric">Biometric unlock</string>
     <string name="settings_biometric_summary">Unlock with fingerprint or face</string>
+    <string name="settings_biometric_unavailable">No strong biometric enrolled on this device</string>
+    <string name="settings_auto_lock">Auto-lock</string>
+    <string name="settings_auto_lock_immediately">Immediately</string>
+    <string name="settings_auto_lock_1min">After 1 minute in background</string>
+    <string name="settings_auto_lock_5min">After 5 minutes in background</string>
+    <string name="settings_lock_now">Lock now</string>
     <string name="settings_break_in_log">Break-in attempt log</string>
     <string name="settings_break_in_log_summary">Stored on this device only — never uploaded</string>
+    <string name="settings_storage">Vault storage</string>
+    <string name="settings_storage_summary">%1$d item(s) • %2$s</string>
     <string name="settings_about">About PhotoLock</string>
+    <string name="settings_about_body">PhotoLock %1$s\n\nYour photos and videos are encrypted on this device with AES-256/GCM; the key never leaves the Android Keystore and nothing is uploaded anywhere.\n\nImportant: if you clear the app data, reset the phone, or the Keystore key is lost, the vault cannot be recovered — export anything important from time to time.</string>
+
+    <!-- Change PIN -->
+    <string name="change_pin_old">Current PIN</string>
+    <string name="change_pin_new">New PIN (4 or 6 digits)</string>
+    <string name="change_pin_confirm">Confirm new PIN</string>
+    <string name="change_pin_wrong_old">Current PIN is wrong</string>
+    <string name="change_pin_mismatch">New PINs don\'t match</string>
+    <string name="change_pin_invalid">Enter 4 or 6 digits</string>
+    <string name="change_pin_done">Your PIN has been changed.</string>
+
+    <!-- Break-in log -->
+    <string name="break_in_empty">No failed unlock attempts recorded.</string>
+    <string name="break_in_attempt_detail">Failed attempt • %1$d in a row</string>
+    <string name="break_in_clear">Clear log</string>
 </resources>
