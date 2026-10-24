@@ -1,10 +1,12 @@
 package com.sowrobrana.photolock.data
 
+import android.Manifest
 import android.app.PendingIntent
 import android.app.RecoverableSecurityException
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
@@ -15,6 +17,7 @@ import android.os.Environment
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import androidx.annotation.RequiresApi
+import androidx.core.content.ContextCompat
 import com.sowrobrana.photolock.crypto.CryptoManager
 import com.sowrobrana.photolock.data.local.BreakInLogEntity
 import com.sowrobrana.photolock.data.local.FolderEntity
@@ -245,7 +248,10 @@ class VaultRepository(
                     thumbnailFileName = if (thumbOk) thumbName else null,
                     importedAtEpochMs = System.currentTimeMillis(),
                     durationMs = durationMs,
-                    sourceMediaUri = resolveMediaStoreUri(sourceUri)?.toString()
+                    // Resolution must never fail the import itself.
+                    sourceMediaUri = runCatching {
+                        resolveMediaStoreUri(sourceUri)
+                    }.getOrNull()?.toString()
                 )
                 itemDao.insert(entity)
                 entity.toDomain()
@@ -489,24 +495,38 @@ class VaultRepository(
             uri.pathSegments.firstOrNull() == "picker"
 
     private fun matchMediaStoreUri(uri: Uri): Uri? {
-        val resolver = appContext.contentResolver
-        val (name, size) = resolver.query(
-            uri,
-            arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE),
-            null, null, null
-        )?.use { c ->
-            if (!c.moveToFirst()) return null
-            val nameIdx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-            val sizeIdx = c.getColumnIndex(OpenableColumns.SIZE)
-            val n = if (nameIdx >= 0) c.getString(nameIdx) else null
-            val s = if (sizeIdx >= 0 && !c.isNull(sizeIdx)) {
-                c.getLong(sizeIdx)
-            } else {
-                -1L
-            }
-            n to s
-        } ?: return null
+        val (name, size) = readPickedMeta(uri) ?: return null
         if (name.isNullOrEmpty() || size <= 0) return null
+        val matches = findMatches(name, size)
+        // Ambiguous: refuse to guess which row is the original.
+        return matches.singleOrNull()
+    }
+
+    /** DISPLAY_NAME + SIZE of a picked item, or null if unreadable. */
+    private fun readPickedMeta(uri: Uri): Pair<String?, Long>? {
+        return runCatching {
+            appContext.contentResolver.query(
+                uri,
+                arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE),
+                null, null, null
+            )?.use { c ->
+                if (!c.moveToFirst()) return@use null
+                val nameIdx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                val sizeIdx = c.getColumnIndex(OpenableColumns.SIZE)
+                val n = if (nameIdx >= 0) c.getString(nameIdx) else null
+                val s = if (sizeIdx >= 0 && !c.isNull(sizeIdx)) {
+                    c.getLong(sizeIdx)
+                } else {
+                    -1L
+                }
+                n to s
+            }
+        }.getOrNull()
+    }
+
+    /** All gallery rows (other apps' only) with this name + size. */
+    private fun findMatches(name: String, size: Long): List<Uri> {
+        val resolver = appContext.contentResolver
         val matches = mutableListOf<Uri>()
         val collections = listOf(
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
@@ -543,10 +563,45 @@ class VaultRepository(
                     }
                 }
             }
-            // Ambiguous: refuse to guess which row is the original.
-            if (matches.size > 1) return null
         }
-        return matches.singleOrNull()
+        return matches
+    }
+
+    /** Whether the gallery read permission is currently held. */
+    private fun hasGalleryReadPermission(): Boolean {
+        val perm = when {
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU ->
+                Manifest.permission.READ_MEDIA_IMAGES
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.R ->
+                Manifest.permission.READ_EXTERNAL_STORAGE
+            else -> return true
+        }
+        return ContextCompat.checkSelfPermission(
+            appContext, perm
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    /**
+     * Diagnostic text for an unresolvable picked item (failure path
+     * only): permission state, picked name/size, and how many gallery
+     * rows matched. This is what the user reports when removal fails,
+     * so the next fix can target the exact step that failed.
+     */
+    fun matchDiagnostics(uri: Uri): String {
+        val access = if (hasGalleryReadPermission()) {
+            "gallery access on"
+        } else {
+            "gallery access off"
+        }
+        val meta = readPickedMeta(uri)
+        if (meta == null) return "$access, picked item unreadable"
+        val (name, size) = meta
+        if (name.isNullOrEmpty() || size <= 0) {
+            return "$access, picked name/size missing"
+        }
+        val matches = runCatching { findMatches(name, size) }.getOrNull()
+            ?: return "$access, picked $name ($size bytes), match query failed"
+        return "$access, picked $name ($size bytes), matches: ${matches.size}"
     }
 
     /**
@@ -571,7 +626,9 @@ class VaultRepository(
     fun buildOriginalsRemovalRequest(uris: List<Uri>): PendingIntent? {
         if (uris.isEmpty()) return null
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
-        val mediaUris = uris.map { resolveMediaStoreUri(it) ?: return null }
+        val mediaUris = uris.map {
+            runCatching { resolveMediaStoreUri(it) }.getOrNull() ?: return null
+        }
         val resolver = appContext.contentResolver
         return runCatching {
             MediaStore.createTrashRequest(resolver, mediaUris, true)
@@ -602,9 +659,21 @@ class VaultRepository(
         // already-deleted rows harmlessly return 0 there.
         val mediaUris = mutableListOf<Uri>()
         var unresolved = 0
+        var unresolvedDiag: String? = null
         for (uri in uris) {
-            val resolved = resolveMediaStoreUri(uri)
-            if (resolved != null) mediaUris += resolved else unresolved++
+            val resolved = runCatching {
+                resolveMediaStoreUri(uri)
+            }.getOrNull()
+            if (resolved != null) {
+                mediaUris += resolved
+            } else {
+                unresolved++
+                if (unresolvedDiag == null) {
+                    unresolvedDiag = runCatching {
+                        matchDiagnostics(uri)
+                    }.getOrNull()
+                }
+            }
         }
         var deleted = 0
         var consent: PendingIntent? = null
@@ -630,7 +699,8 @@ class VaultRepository(
             else -> DeleteOriginalsResult.Failed(
                 firstFailure
                     ?: if (unresolved > 0) {
-                        "original not found in your gallery"
+                        "original not found in your gallery" +
+                            (unresolvedDiag?.let { " ($it)" } ?: "")
                     } else {
                         "unknown error"
                     }
