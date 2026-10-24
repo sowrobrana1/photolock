@@ -48,9 +48,14 @@ reference points). Everything in this plan is built around one rule:
 - Grid of thumbnails (decrypted in memory only), folders, sort by date/name.
 - **Folders** — create / rename / delete (items fall back to root), move items
   between folders.
-- **Viewer** — full-screen photo viewer (zoom/pan) and video player, both fed
-  from decrypted streams. FLAG_SECURE on viewer + grid so vault content does
-  not leak into screenshots or the recents thumbnail.
+- **Viewer** — full-screen photo viewer (zoom/pan) and video player.
+  FLAG_SECURE on viewer + grid so vault content does not leak into
+  screenshots or the recents thumbnail. *Phase 1 implementation note:*
+  photos are decrypted into memory; **videos are decrypted to a short-lived
+  file in app-private `cacheDir`** and deleted when the viewer closes
+  (swept again at app start). The v1 GCM format is a single non-seekable
+  stream and ExoPlayer needs a seekable source — true streaming waits for
+  the Phase 2 chunked-AEAD format.
 - Multi-select: export, move, delete (deleting a vault item deletes only the
   encrypted blob — with a confirmation).
 
@@ -64,6 +69,10 @@ reference points). Everything in this plan is built around one rule:
 - Every failed unlock records: timestamp, attempt count. Optional (user
   setting, default ON): a front-camera snapshot at the moment of failure,
   stored **encrypted inside the vault** like any other item.
+  *Phase 1 implementation note:* the log itself (timestamp + streak count,
+  viewable/clearable from Settings) ships in Phase 1; the front-camera
+  snapshot is deferred to Phase 2 (it needs a CameraX pipeline and its own
+  consent wording).
 - The log is viewable/clearable from Settings after a successful unlock.
 - **It is never uploaded, synced, or shared — there is no server.** This is
   stated verbatim in the Play listing and privacy policy.
@@ -213,7 +222,7 @@ Target devices run Android 11–15 (user's phone: Samsung S23 Ultra). Rules:
 | Phase | Contents | Status |
 |---|---|---|
 | **0 — Scaffold** | Gradle/Compose project, NavHost skeleton (Lock / Vault / Settings placeholders), `CryptoManager` (real, streaming AES-GCM), `VaultRepository` stub with final-shaped API + TODOs, icon placeholder, Actions debug-APK workflow | ✅ This delivery |
-| **1 — MVP** | PIN create/verify (salted hash) + biometric, Photo Picker import pipeline + thumbnails, Room index, grid + viewer (FLAG_SECURE), folders, export via MediaStore, delete-originals consent flow, break-in log, auto-lock | Next |
+| **1 — MVP** | PIN create/verify (salted hash) + biometric, Photo Picker import pipeline + thumbnails, Room index, grid + viewer (FLAG_SECURE), folders, export via MediaStore, delete-originals consent flow, break-in log, auto-lock | ✅ Done — implemented locally, awaiting push + first Actions build. Trims vs. plan: break-in front-camera snapshot → Phase 2; video playback via app-private cache temp file (deleted on close) instead of a decrypting stream — see §1.3 note |
 | **2 — Hardening** | Chunked-AEAD format v2, instrumented crypto round-trip tests (Keystore needs device/emulator), viewer video seeking, edge cases (key invalidation, low storage, huge files) | |
 | **3 — Store prep** | AdMob (outside lock/viewer only), final icon/artwork, listing text EN+BN, privacy policy page, release signing + AAB workflow, closed testing | |
 
