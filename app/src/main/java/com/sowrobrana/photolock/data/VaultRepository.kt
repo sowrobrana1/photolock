@@ -646,13 +646,8 @@ class VaultRepository(
         }.getOrNull() ?: false
     }
 
-    companion object {
-        /** Full byte compare up to this size; larger files use a prefix. */
-        private const val FULL_COMPARE_MAX_BYTES = 8L * 1024 * 1024
-
-        /** Cap on same-size candidates tried with content verification. */
-        private const val MAX_SIZE_CANDIDATES = 50
-    }
+    // NOTE: FULL_COMPARE_MAX_BYTES / MAX_SIZE_CANDIDATES live in the
+    // class's single companion object at the end of this file.
 
     /** DISPLAY_NAME + SIZE of a picked item, or null if unreadable. */
     private fun readPickedMeta(uri: Uri): Pair<String?, Long>? {
@@ -1072,5 +1067,11 @@ class VaultRepository(
         private const val THUMB_JPEG_QUALITY = 82
         private const val VIDEO_FRAME_AT_US = 500_000L
         private const val PIPE_BUFFER_SIZE = 64 * 1024
+
+        /** Full byte compare up to this size; larger files use a prefix. */
+        private const val FULL_COMPARE_MAX_BYTES = 8L * 1024 * 1024
+
+        /** Cap on same-size candidates tried with content verification. */
+        private const val MAX_SIZE_CANDIDATES = 50
     }
 }
