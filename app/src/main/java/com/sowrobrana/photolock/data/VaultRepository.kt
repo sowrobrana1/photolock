@@ -538,10 +538,20 @@ class VaultRepository(
     ): List<Candidate> {
         val resolver = appContext.contentResolver
         val out = mutableListOf<Candidate>()
-        val collections = listOf(
+        // NOTE: images sitting in the Download/ directory live in the
+        // DOWNLOADS collection, not Images — the Photo Picker still
+        // shows them, so a fallback that only searched Images/Video
+        // reported "name matches: 0, size matches: 0" for re-downloaded
+        // pictures (seen 2026-10-24: picked 1000059636.jpg, 83697 bytes,
+        // visible in Gallery, zero matches). Downloads exists from
+        // API 29, so it is added only there (minSdk is 26).
+        val collections = mutableListOf(
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
             MediaStore.Video.Media.EXTERNAL_CONTENT_URI
         )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            collections += MediaStore.Downloads.EXTERNAL_CONTENT_URI
+        }
         for (collection in collections) {
             runCatching {
                 resolver.query(
