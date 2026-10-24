@@ -462,13 +462,17 @@ class VaultRepository(
      * local Gallery pick — [MediaStore.getMediaUri] returns null
      * there instead of converting.
      *
-     * Two-step resolution, never returning a picker URI:
+     * Multi-step resolution, never returning a picker URI:
      *  1. [MediaStore.getMediaUri] (API 33+).
-     *  2. Match by display name + size against the image/video
+     *  2. Unique display-name + size match against the image/video
      *     collections (needs gallery read permission on API 30+;
      *     without it the query sees only this app's own media and
-     *     the match fails). Ambiguous matches (2+ rows) and rows
-     *     owned by this app itself (its own exports) are refused.
+     *     the match fails).
+     *  3. Same-name candidates verified by content (covers a stale
+     *     SIZE row after an edit/resave, and resolves duplicates).
+     *  4. Same-size candidates verified by content (covers a rename).
+     *  Rows owned by this app itself (its own exports) are never
+     *  matched.
      *
      * Returns null when the item cannot be matched — callers must
      * treat that as "original not removable from here" and say so,
@@ -497,9 +501,157 @@ class VaultRepository(
     private fun matchMediaStoreUri(uri: Uri): Uri? {
         val (name, size) = readPickedMeta(uri) ?: return null
         if (name.isNullOrEmpty() || size <= 0) return null
-        val matches = findMatches(name, size)
-        // Ambiguous: refuse to guess which row is the original.
-        return matches.singleOrNull()
+        // 1. Exact name + size, unique — the fast path.
+        val exact = findCandidates(
+            "${MediaStore.MediaColumns.DISPLAY_NAME} = ? " +
+                "AND ${MediaStore.MediaColumns.SIZE} = ?",
+            arrayOf(name, size.toString())
+        )
+        if (exact.size == 1) return exact[0].uri
+        // 2. Same name (covers a stale SIZE row after an edit/resave):
+        // verify by content, so duplicates resolve to the true original.
+        val byName = findCandidates(
+            "${MediaStore.MediaColumns.DISPLAY_NAME} = ?",
+            arrayOf(name)
+        )
+        for (c in byName) {
+            if (contentMatches(uri, c.uri, size, c.rowSize)) return c.uri
+        }
+        // 3. Same size (covers a renamed file): verify by content.
+        val bySize = findCandidates(
+            "${MediaStore.MediaColumns.SIZE} = ?",
+            arrayOf(size.toString())
+        ).take(MAX_SIZE_CANDIDATES)
+        for (c in bySize) {
+            if (contentMatches(uri, c.uri, size, c.rowSize)) return c.uri
+        }
+        return null
+    }
+
+    /** A gallery row that might be the picked item's original. */
+    private data class Candidate(val uri: Uri, val rowSize: Long)
+
+    /** Gallery rows (other apps' only) matching a MediaStore selection. */
+    private fun findCandidates(
+        selection: String,
+        args: Array<String>
+    ): List<Candidate> {
+        val resolver = appContext.contentResolver
+        val out = mutableListOf<Candidate>()
+        val collections = listOf(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+        )
+        for (collection in collections) {
+            runCatching {
+                resolver.query(
+                    collection,
+                    arrayOf(
+                        MediaStore.MediaColumns._ID,
+                        MediaStore.MediaColumns.SIZE,
+                        MediaStore.MediaColumns.OWNER_PACKAGE_NAME
+                    ),
+                    selection, args, null
+                )?.use { c ->
+                    val idIdx = c.getColumnIndex(MediaStore.MediaColumns._ID)
+                    val sizeIdx =
+                        c.getColumnIndex(MediaStore.MediaColumns.SIZE)
+                    val ownerIdx =
+                        c.getColumnIndex(MediaStore.MediaColumns.OWNER_PACKAGE_NAME)
+                    while (c.moveToNext()) {
+                        // Never match this app's own exports back to
+                        // itself — only genuine gallery originals count.
+                        val owner = if (ownerIdx >= 0) {
+                            c.getString(ownerIdx)
+                        } else {
+                            null
+                        }
+                        if (owner == appContext.packageName) continue
+                        val rowSize = if (sizeIdx >= 0 && !c.isNull(sizeIdx)) {
+                            c.getLong(sizeIdx)
+                        } else {
+                            -1L
+                        }
+                        out += Candidate(
+                            ContentUris.withAppendedId(
+                                collection, c.getLong(idIdx)
+                            ),
+                            rowSize
+                        )
+                    }
+                }
+            }
+        }
+        return out
+    }
+
+    /**
+     * True when the picked item's bytes match the candidate's. Small
+     * files compare fully; large files compare an 8 MB prefix and
+     * additionally require the stored size to agree (a prefix alone
+     * could match two edits sharing the same opening frames). The
+     * comparison exits on the first differing byte, so non-matches
+     * are cheap. Short reads are handled on both sides.
+     */
+    private fun contentMatches(
+        picked: Uri,
+        candidate: Uri,
+        pickedSize: Long,
+        rowSize: Long
+    ): Boolean {
+        if (pickedSize > FULL_COMPARE_MAX_BYTES && rowSize != pickedSize) {
+            return false
+        }
+        val limit = minOf(pickedSize, FULL_COMPARE_MAX_BYTES)
+        if (limit <= 0) return false
+        val resolver = appContext.contentResolver
+        return runCatching {
+            resolver.openInputStream(picked)?.use { pin ->
+                resolver.openInputStream(candidate)?.use { cin ->
+                    val buf = ByteArray(8192)
+                    var remaining = limit
+                    while (remaining > 0) {
+                        val want = minOf(
+                            buf.size.toLong(), remaining
+                        ).toInt()
+                        val pr = pin.read(buf, 0, want)
+                        if (pr <= 0) {
+                            // Picked ended early: candidate must end
+                            // here too, or the files differ.
+                            return@runCatching cin.read() < 0
+                        }
+                        // Read exactly pr bytes from the candidate.
+                        var filled = 0
+                        val cbuf = ByteArray(pr)
+                        while (filled < pr) {
+                            val cr = cin.read(cbuf, filled, pr - filled)
+                            if (cr <= 0) return@runCatching false
+                            filled += cr
+                        }
+                        if (!buf.copyOf(pr).contentEquals(cbuf)) {
+                            return@runCatching false
+                        }
+                        remaining -= pr
+                    }
+                    // Full compare: candidate must also be at EOF.
+                    // Prefix compare (large files): the size guard
+                    // above already agreed.
+                    if (pickedSize <= FULL_COMPARE_MAX_BYTES) {
+                        cin.read() < 0
+                    } else {
+                        true
+                    }
+                }
+            } ?: false
+        }.getOrNull() ?: false
+    }
+
+    companion object {
+        /** Full byte compare up to this size; larger files use a prefix. */
+        private const val FULL_COMPARE_MAX_BYTES = 8L * 1024 * 1024
+
+        /** Cap on same-size candidates tried with content verification. */
+        private const val MAX_SIZE_CANDIDATES = 50
     }
 
     /** DISPLAY_NAME + SIZE of a picked item, or null if unreadable. */
@@ -525,48 +677,6 @@ class VaultRepository(
     }
 
     /** All gallery rows (other apps' only) with this name + size. */
-    private fun findMatches(name: String, size: Long): List<Uri> {
-        val resolver = appContext.contentResolver
-        val matches = mutableListOf<Uri>()
-        val collections = listOf(
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-            MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-        )
-        for (collection in collections) {
-            runCatching {
-                resolver.query(
-                    collection,
-                    arrayOf(
-                        MediaStore.MediaColumns._ID,
-                        MediaStore.MediaColumns.OWNER_PACKAGE_NAME
-                    ),
-                    "${MediaStore.MediaColumns.DISPLAY_NAME} = ? " +
-                        "AND ${MediaStore.MediaColumns.SIZE} = ?",
-                    arrayOf(name, size.toString()),
-                    null
-                )?.use { c ->
-                    val idIdx = c.getColumnIndex(MediaStore.MediaColumns._ID)
-                    val ownerIdx =
-                        c.getColumnIndex(MediaStore.MediaColumns.OWNER_PACKAGE_NAME)
-                    while (c.moveToNext()) {
-                        // Never match this app's own exports back to
-                        // itself — only genuine gallery originals count.
-                        val owner = if (ownerIdx >= 0) {
-                            c.getString(ownerIdx)
-                        } else {
-                            null
-                        }
-                        if (owner == appContext.packageName) continue
-                        matches += ContentUris.withAppendedId(
-                            collection, c.getLong(idIdx)
-                        )
-                    }
-                }
-            }
-        }
-        return matches
-    }
-
     /** Whether the gallery read permission is currently held. */
     private fun hasGalleryReadPermission(): Boolean {
         val perm = when {
@@ -584,8 +694,9 @@ class VaultRepository(
     /**
      * Diagnostic text for an unresolvable picked item (failure path
      * only): permission state, picked name/size, and how many gallery
-     * rows matched. This is what the user reports when removal fails,
-     * so the next fix can target the exact step that failed.
+     * rows share the name vs the size. This is what the user reports
+     * when removal fails, so the next fix can target the exact step
+     * that failed (e.g. name matches 1 + size matches 0 = stale SIZE).
      */
     fun matchDiagnostics(uri: Uri): String {
         val access = if (hasGalleryReadPermission()) {
@@ -599,9 +710,23 @@ class VaultRepository(
         if (name.isNullOrEmpty() || size <= 0) {
             return "$access, picked name/size missing"
         }
-        val matches = runCatching { findMatches(name, size) }.getOrNull()
-            ?: return "$access, picked $name ($size bytes), match query failed"
-        return "$access, picked $name ($size bytes), matches: ${matches.size}"
+        val nameCount = runCatching {
+            findCandidates(
+                "${MediaStore.MediaColumns.DISPLAY_NAME} = ?",
+                arrayOf(name)
+            ).size
+        }.getOrNull()
+        val sizeCount = runCatching {
+            findCandidates(
+                "${MediaStore.MediaColumns.SIZE} = ?",
+                arrayOf(size.toString())
+            ).size
+        }.getOrNull()
+        if (nameCount == null || sizeCount == null) {
+            return "$access, picked $name ($size bytes), match query failed"
+        }
+        return "$access, picked $name ($size bytes), " +
+            "name matches: $nameCount, size matches: $sizeCount"
     }
 
     /**
