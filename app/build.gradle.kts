@@ -21,7 +21,25 @@ android {
         }
     }
 
+    // Stable DEBUG signing key, committed on purpose: every GitHub runner
+    // otherwise generates its own throwaway debug key, and Android then
+    // refuses to install an update over the previous build ("App not
+    // installed" — signature mismatch, seen 2026-10-24). This is a DEBUG
+    // key only; the future RELEASE key must never be committed.
+    signingConfigs {
+        getByName("debug") {
+            storeFile = rootProject.file("keystores/debug.p12")
+            storePassword = "photolock-debug"
+            keyAlias = "photolock-debug"
+            keyPassword = "photolock-debug"
+            storeType = "PKCS12"
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("debug")
+        }
         release {
             // Phase 2: enable minify + shrinkResources once the feature set is
             // stable and the release keystore exists (never commit it — see .gitignore).
