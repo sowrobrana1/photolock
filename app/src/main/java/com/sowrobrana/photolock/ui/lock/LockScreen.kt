@@ -1,5 +1,10 @@
 package com.sowrobrana.photolock.ui.lock
 
+import android.content.Context
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.keyframes
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -8,17 +13,21 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -26,51 +35,102 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import androidx.fragment.app.FragmentActivity
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.sowrobrana.photolock.R
-import com.sowrobrana.photolock.ui.theme.PhotoLockTheme
-
-/** PIN length for the MVP. Phase 1: make it a user setting (4 or 6). */
-private const val PIN_LENGTH = 4
+import kotlin.math.roundToInt
 
 /**
- * PIN-pad lock screen (placeholder logic).
- *
- * TODO(Phase 1) — real unlock flow:
- *  1. First run: "create PIN" + confirm flow; store only a salted hash
- *     (e.g. PBKDF2/BCrypt) in the settings store — never the PIN itself.
- *  2. Verify the entered PIN against the hash; on success call [onUnlocked].
- *  3. On failure: clear the pad, shake/vibrate, and record a break-in attempt
- *     (timestamp + optional front-camera snapshot encrypted into the vault —
- *     ON-DEVICE ONLY, never uploaded; see PLAN.md).
- *  4. Biometric button: androidx.biometric BiometricPrompt; requires the host
- *     activity to become a FragmentActivity (see MainActivity note).
- *  5. Exponential back-off after repeated failures (e.g. 30 s after 5 tries).
+ * PIN-pad lock screen (real flow — see [LockViewModel]):
+ *  - first run: create PIN (4 or 6 digits) + confirm; only a salted PBKDF2
+ *    hash is stored;
+ *  - later runs: verify against the hash; wrong PIN shakes the pad, logs a
+ *    break-in attempt on-device, and backs off exponentially;
+ *  - fingerprint button (and an automatic prompt on entry) when the user
+ *    enabled biometric unlock and the device supports it. PIN always works
+ *    as the fallback.
  */
 @Composable
 fun LockScreen(
+    viewModel: LockViewModel,
     onUnlocked: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var pin by remember { mutableStateOf("") }
+    val state by viewModel.state.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val haptics = LocalHapticFeedback.current
 
-    fun onDigit(digit: Char) {
-        if (pin.length >= PIN_LENGTH) return
-        pin += digit
-        if (pin.length == PIN_LENGTH) {
-            // PLACEHOLDER: any complete PIN "unlocks" in the scaffold so the
-            // navigation flow can be exercised on a real device. Phase 1
-            // replaces this with hash verification (see TODO above) and only
-            // calls onUnlocked() on a match.
-            onUnlocked()
+    LaunchedEffect(viewModel) {
+        viewModel.unlockEvents.collect { onUnlocked() }
+    }
+
+    // Wrong-PIN feedback: shake the dots + a haptic buzz.
+    val shakeX = remember { Animatable(0f) }
+    LaunchedEffect(state.shakeTrigger) {
+        if (state.shakeTrigger == 0) return@LaunchedEffect
+        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+        shakeX.snapTo(0f)
+        shakeX.animateTo(
+            targetValue = 0f,
+            animationSpec = keyframes {
+                durationMillis = 400
+                0f at 0
+                (-14f) at 60
+                12f at 120
+                (-9f) at 180
+                7f at 240
+                (-4f) at 300
+                0f at 360
+            }
+        )
+    }
+
+    fun launchBiometric() {
+        val activity = context.findFragmentActivity() ?: return
+        val prompt = BiometricPrompt(
+            activity,
+            ContextCompat.getMainExecutor(activity),
+            object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationSucceeded(
+                    result: BiometricPrompt.AuthenticationResult
+                ) {
+                    viewModel.onBiometricSuccess()
+                }
+                // Errors (incl. user tapping "Use PIN" / cancel) fall back
+                // to the PIN pad silently.
+            }
+        )
+        val info = BiometricPrompt.PromptInfo.Builder()
+            .setTitle(context.getString(R.string.biometric_title))
+            .setSubtitle(context.getString(R.string.biometric_subtitle))
+            .setNegativeButtonText(context.getString(R.string.lock_use_pin))
+            .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+            .build()
+        prompt.authenticate(info)
+    }
+
+    // Offer biometrics once when the pad appears (if opted in + available).
+    var autoPromptDone by remember { mutableStateOf(false) }
+    LaunchedEffect(state.mode, state.biometricEnabled, state.biometricAvailable) {
+        if (!autoPromptDone &&
+            state.mode == LockMode.ENTER &&
+            state.biometricEnabled &&
+            state.biometricAvailable
+        ) {
+            autoPromptDone = true
+            launchBiometric()
         }
     }
 
-    fun onDelete() {
-        pin = pin.dropLast(1)
-    }
+    val lockedOut = state.lockoutSecondsLeft > 0
+    val padEnabled = !lockedOut && !state.isBusy && state.isReady
 
     Column(
         modifier = modifier
@@ -96,17 +156,28 @@ fun LockScreen(
         Spacer(modifier = Modifier.height(8.dp))
 
         Text(
-            text = stringResource(R.string.lock_enter_pin),
+            text = stringResource(
+                when (state.mode) {
+                    LockMode.CREATE -> R.string.lock_create_pin
+                    LockMode.CONFIRM -> R.string.lock_confirm_pin
+                    LockMode.ENTER -> R.string.lock_enter_pin
+                }
+            ),
             style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
 
         Spacer(modifier = Modifier.height(24.dp))
 
-        // PIN dots
-        Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-            repeat(PIN_LENGTH) { index ->
-                val filled = index < pin.length
+        // PIN dots (shake on failure)
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            modifier = Modifier.offset {
+                IntOffset(shakeX.value.roundToInt(), 0)
+            }
+        ) {
+            repeat(state.pinLength) { index ->
+                val filled = index < state.entered.length
                 Box(
                     modifier = Modifier
                         .size(16.dp)
@@ -119,25 +190,76 @@ fun LockScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(32.dp))
+        // Error / lockout line (fixed height so the pad doesn't jump)
+        Box(
+            modifier = Modifier.height(32.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            when {
+                lockedOut -> Text(
+                    text = stringResource(
+                        R.string.lock_lockout,
+                        state.lockoutSecondsLeft
+                    ),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error
+                )
 
-        // Keypad: 1-9, then (biometric placeholder) 0 (delete)
-        val keys = listOf(
+                state.error != null -> Text(
+                    text = stringResource(
+                        when (state.error) {
+                            LockError.WRONG_PIN -> R.string.lock_wrong_pin
+                            LockError.PIN_MISMATCH -> R.string.lock_pin_mismatch
+                            null -> R.string.lock_wrong_pin
+                        }
+                    ),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // Keypad: 1-9, then (fingerprint | spacer) 0 (delete)
+        val keys: List<List<Char?>> = listOf(
             listOf('1', '2', '3'),
             listOf('4', '5', '6'),
             listOf('7', '8', '9'),
             listOf(null, '0', '⌫')
         )
-        keys.forEach { row ->
+        keys.forEachIndexed { rowIndex, row ->
             Row(
                 horizontalArrangement = Arrangement.spacedBy(20.dp),
                 modifier = Modifier.padding(vertical = 6.dp)
             ) {
-                row.forEach { key ->
-                    when (key) {
-                        null -> Spacer(modifier = Modifier.size(72.dp))
-                        '⌫' -> FilledTonalButton(
-                            onClick = { onDelete() },
+                row.forEachIndexed { colIndex, key ->
+                    val isFingerprintSlot = rowIndex == 3 && colIndex == 0
+                    when {
+                        isFingerprintSlot &&
+                            state.mode == LockMode.ENTER &&
+                            state.biometricAvailable -> {
+                            FilledTonalIconButton(
+                                onClick = { launchBiometric() },
+                                enabled = !lockedOut && !state.isBusy,
+                                modifier = Modifier.size(72.dp),
+                                shape = CircleShape
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Fingerprint,
+                                    contentDescription = stringResource(
+                                        R.string.lock_use_biometric
+                                    ),
+                                    modifier = Modifier.size(32.dp)
+                                )
+                            }
+                        }
+
+                        key == null -> Spacer(modifier = Modifier.size(72.dp))
+
+                        key == '⌫' -> FilledTonalButton(
+                            onClick = { viewModel.onDelete() },
+                            enabled = padEnabled,
                             modifier = Modifier.size(72.dp),
                             shape = CircleShape
                         ) {
@@ -148,7 +270,8 @@ fun LockScreen(
                         }
 
                         else -> FilledTonalButton(
-                            onClick = { onDigit(key) },
+                            onClick = { viewModel.onDigit(key) },
+                            enabled = padEnabled,
                             modifier = Modifier.size(72.dp),
                             shape = CircleShape
                         ) {
@@ -162,18 +285,29 @@ fun LockScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(16.dp))
-
-        TextButton(onClick = { /* TODO(Phase 1): BiometricPrompt */ }) {
-            Text(text = stringResource(R.string.lock_use_biometric))
+        if (state.mode != LockMode.ENTER) {
+            Spacer(modifier = Modifier.height(8.dp))
+            TextButton(onClick = { viewModel.onTogglePinLength() }) {
+                Text(
+                    text = stringResource(
+                        if (state.pinLength == 4) {
+                            R.string.lock_use_6_digit
+                        } else {
+                            R.string.lock_use_4_digit
+                        }
+                    )
+                )
+            }
         }
     }
 }
 
-@Preview(showBackground = true)
-@Composable
-private fun LockScreenPreview() {
-    PhotoLockTheme {
-        LockScreen(onUnlocked = {})
+/** LocalContext inside MainActivity IS the FragmentActivity; walk up just in case. */
+private fun Context.findFragmentActivity(): FragmentActivity? {
+    var ctx: Context? = this
+    while (ctx != null) {
+        if (ctx is FragmentActivity) return ctx
+        ctx = (ctx as? android.content.ContextWrapper)?.baseContext
     }
+    return null
 }
