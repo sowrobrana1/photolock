@@ -210,7 +210,11 @@ class VaultViewModel(
                     is DeleteOriginalsResult.Deleted -> {
                         internal.update { it.copy(pendingOriginals = emptyList()) }
                         _events.tryEmit(
-                            VaultEvent.Message("Originals removed from your gallery")
+                            VaultEvent.Message(
+                                removalDoneMessage(
+                                    result.count, result.unresolved
+                                )
+                            )
                         )
                     }
                     is DeleteOriginalsResult.NeedsConsent -> {
@@ -271,7 +275,11 @@ class VaultViewModel(
                 when (val result = repository.deleteOriginalsWithConsent(uris)) {
                     is DeleteOriginalsResult.Deleted -> {
                         _events.tryEmit(
-                            VaultEvent.Message("Originals removed from your gallery")
+                            VaultEvent.Message(
+                                removalDoneMessage(
+                                    result.count, result.unresolved
+                                )
+                            )
                         )
                     }
                     is DeleteOriginalsResult.NeedsConsent -> {
@@ -300,6 +308,16 @@ class VaultViewModel(
     /** True on API < 29, where the UI must hold WRITE_EXTERNAL_STORAGE. */
     fun needsLegacyWritePermission(): Boolean =
         Build.VERSION.SDK_INT < Build.VERSION_CODES.Q
+
+    /** Success message for a delete-with-consent pass. */
+    private fun removalDoneMessage(count: Int, unresolved: Int): String =
+        if (unresolved > 0) {
+            "Removed $count original(s) from your gallery; " +
+                "$unresolved could not be found there — please delete " +
+                "them from your gallery app"
+        } else {
+            "Originals removed from your gallery"
+        }
 
     // ------------------------------------------------------- selection actions
 

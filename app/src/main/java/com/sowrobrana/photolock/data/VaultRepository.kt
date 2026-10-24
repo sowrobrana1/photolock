@@ -2,6 +2,7 @@ package com.sowrobrana.photolock.data
 
 import android.app.PendingIntent
 import android.app.RecoverableSecurityException
+import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
@@ -59,7 +60,7 @@ data class VaultItem(
     /**
      * MediaStore URI of the gallery original this item was imported from
      * (converted from the Photo Picker URI at import — see
-     * [VaultRepository.toMediaStoreUri]), or null when unknown (items
+     * [VaultRepository.resolveMediaStoreUri]), or null when unknown (items
      * imported before this was recorded). Used only by the explicit
      * "remove original from gallery" action.
      */
@@ -76,10 +77,15 @@ data class VaultItem(
  * the first exception, for display to the user).
  */
 sealed interface DeleteOriginalsResult {
-    data class Deleted(val count: Int) : DeleteOriginalsResult
+    data class Deleted(
+        val count: Int,
+        /** Picked items that could not be matched to a gallery row. */
+        val unresolved: Int = 0
+    ) : DeleteOriginalsResult
     data class NeedsConsent(
         val intent: PendingIntent,
-        val remainingUris: List<Uri>
+        val remainingUris: List<Uri>,
+        val unresolved: Int = 0
     ) : DeleteOriginalsResult
     data class Failed(val reason: String) : DeleteOriginalsResult
 }
@@ -239,7 +245,7 @@ class VaultRepository(
                     thumbnailFileName = if (thumbOk) thumbName else null,
                     importedAtEpochMs = System.currentTimeMillis(),
                     durationMs = durationMs,
-                    sourceMediaUri = toMediaStoreUri(sourceUri).toString()
+                    sourceMediaUri = resolveMediaStoreUri(sourceUri)?.toString()
                 )
                 itemDao.insert(entity)
                 entity.toDomain()
@@ -440,18 +446,107 @@ class VaultRepository(
     // ------------------------------------------------- delete original files
 
     /**
-     * Converts a Photo Picker URI (`content://media/picker/...`) into the
-     * MediaStore URI for the same item. Picker URIs identify the item only
-     * inside the picker grant — the MediaStore consent APIs
-     * (createTrashRequest / createDeleteRequest) cannot operate on them
-     * and fail, which is why originals silently stayed in the gallery.
-     * [MediaStore.getMediaUri] (API 33+) performs the conversion; below
-     * API 33, or when conversion fails, the URI is returned unchanged.
+     * Resolves a picked item to its MediaStore URI — the form the
+     * MediaStore removal APIs understand. Picker URIs
+     * (content://media/picker/...) are NOT understood by those APIs:
+     * feeding one to createTrashRequest / createDeleteRequest /
+     * ContentResolver.delete throws IllegalArgumentException
+     * ("volume picker not found"), which is exactly what v0.2.2
+     * surfaced on the user's Samsung S23 Ultra even for a fresh,
+     * local Gallery pick — [MediaStore.getMediaUri] returns null
+     * there instead of converting.
+     *
+     * Two-step resolution, never returning a picker URI:
+     *  1. [MediaStore.getMediaUri] (API 33+).
+     *  2. Match by display name + size against the image/video
+     *     collections (needs gallery read permission on API 30+;
+     *     without it the query sees only this app's own media and
+     *     the match fails). Ambiguous matches (2+ rows) and rows
+     *     owned by this app itself (its own exports) are refused.
+     *
+     * Returns null when the item cannot be matched — callers must
+     * treat that as "original not removable from here" and say so,
+     * never pass the picker URI on to a MediaStore API.
+     *
+     * NOTE: this runs at import time for [VaultItem.sourceMediaUri]
+     * before any gallery permission is granted, so an item whose
+     * import-time resolution failed hides the viewer remove action
+     * even if a later, permission-backed resolution would succeed —
+     * the post-import dialog (permission-gated) remains the main path.
      */
-    fun toMediaStoreUri(uri: Uri): Uri {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return uri
-        return runCatching { MediaStore.getMediaUri(appContext, uri) }
-            .getOrNull() ?: uri
+    fun resolveMediaStoreUri(uri: Uri): Uri? {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val converted = runCatching {
+                MediaStore.getMediaUri(appContext, uri)
+            }.getOrNull()
+            if (converted != null && !isPickerUri(converted)) return converted
+        }
+        return matchMediaStoreUri(uri)
+    }
+
+    private fun isPickerUri(uri: Uri): Boolean =
+        uri.authority == MediaStore.AUTHORITY &&
+            uri.pathSegments.firstOrNull() == "picker"
+
+    private fun matchMediaStoreUri(uri: Uri): Uri? {
+        val resolver = appContext.contentResolver
+        val (name, size) = resolver.query(
+            uri,
+            arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE),
+            null, null, null
+        )?.use { c ->
+            if (!c.moveToFirst()) return null
+            val nameIdx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            val sizeIdx = c.getColumnIndex(OpenableColumns.SIZE)
+            val n = if (nameIdx >= 0) c.getString(nameIdx) else null
+            val s = if (sizeIdx >= 0 && !c.isNull(sizeIdx)) {
+                c.getLong(sizeIdx)
+            } else {
+                -1L
+            }
+            n to s
+        } ?: return null
+        if (name.isNullOrEmpty() || size <= 0) return null
+        val matches = mutableListOf<Uri>()
+        val collections = listOf(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+        )
+        for (collection in collections) {
+            runCatching {
+                resolver.query(
+                    collection,
+                    arrayOf(
+                        MediaStore.MediaColumns._ID,
+                        MediaStore.MediaColumns.OWNER_PACKAGE_NAME
+                    ),
+                    "${MediaStore.MediaColumns.DISPLAY_NAME} = ? " +
+                        "AND ${MediaStore.MediaColumns.SIZE} = ?",
+                    arrayOf(name, size.toString()),
+                    null
+                )?.use { c ->
+                    val idIdx = c.getColumnIndex(MediaStore.MediaColumns._ID)
+                    val ownerIdx =
+                        c.getColumnIndex(MediaStore.MediaColumns.OWNER_PACKAGE_NAME)
+                    while (c.moveToNext()) {
+                        // Never match this app's own exports back to
+                        // itself — only genuine gallery originals count.
+                        val owner = if (ownerIdx >= 0) {
+                            c.getString(ownerIdx)
+                        } else {
+                            null
+                        }
+                        if (owner == appContext.packageName) continue
+                        matches += ContentUris.withAppendedId(
+                            collection, c.getLong(idIdx)
+                        )
+                    }
+                }
+            }
+            // Ambiguous: refuse to guess which row is the original.
+            if (matches.size > 1) return null
+        }
+        return matches.singleOrNull()
     }
 
     /**
@@ -462,11 +557,13 @@ class VaultRepository(
      * system shows the dialog naming the files. The app cannot and must
      * not delete silently.
      *
-     * Every URI is first converted with [toMediaStoreUri] (picker URIs
-     * are rejected by the MediaStore APIs). If the trash request cannot
-     * be built, a [MediaStore.createDeleteRequest] (permanent delete,
-     * still behind the system consent dialog) is tried as a fallback;
-     * null is returned only when both fail — callers then fall back to
+     * Every URI is first resolved with [resolveMediaStoreUri] (picker
+     * URIs are rejected by the MediaStore APIs, so an unresolvable
+     * item makes the whole request null rather than poisoning it).
+     * If the trash request cannot be built, a
+     * [MediaStore.createDeleteRequest] (permanent delete, still behind
+     * the system consent dialog) is tried as a fallback; null is
+     * returned only when both fail — callers then fall back to
      * [deleteOriginalsWithConsent], the third step of the chain.
      *
      * Returns null below API 30 — use [deleteOriginalsLegacy] there.
@@ -474,7 +571,7 @@ class VaultRepository(
     fun buildOriginalsRemovalRequest(uris: List<Uri>): PendingIntent? {
         if (uris.isEmpty()) return null
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
-        val mediaUris = uris.map { toMediaStoreUri(it) }
+        val mediaUris = uris.map { resolveMediaStoreUri(it) ?: return null }
         val resolver = appContext.contentResolver
         return runCatching {
             MediaStore.createTrashRequest(resolver, mediaUris, true)
@@ -499,19 +596,24 @@ class VaultRepository(
         uris: List<Uri>
     ): DeleteOriginalsResult = withContext(Dispatchers.IO) {
         val resolver = appContext.contentResolver
-        val mediaUris = uris.map { toMediaStoreUri(it) }
+        // Resolve first: unresolvable items are counted, never fed to
+        // the MediaStore APIs (that was the "volume picker not found"
+        // failure). The consent retry re-runs the full list, so
+        // already-deleted rows harmlessly return 0 there.
+        val mediaUris = mutableListOf<Uri>()
+        var unresolved = 0
+        for (uri in uris) {
+            val resolved = resolveMediaStoreUri(uri)
+            if (resolved != null) mediaUris += resolved else unresolved++
+        }
         var deleted = 0
         var consent: PendingIntent? = null
-        var remaining: List<Uri> = emptyList()
         var firstFailure: String? = null
-        for ((index, uri) in mediaUris.withIndex()) {
+        for (uri in mediaUris) {
             try {
                 if (resolver.delete(uri, null, null) > 0) deleted++
             } catch (e: RecoverableSecurityException) {
-                if (consent == null) {
-                    consent = e.userAction.actionIntent
-                    remaining = mediaUris.subList(index, mediaUris.size)
-                }
+                if (consent == null) consent = e.userAction.actionIntent
                 break
             } catch (e: Exception) {
                 if (firstFailure == null) {
@@ -522,9 +624,17 @@ class VaultRepository(
         }
         when {
             consent != null ->
-                DeleteOriginalsResult.NeedsConsent(consent, remaining)
-            deleted > 0 -> DeleteOriginalsResult.Deleted(deleted)
-            else -> DeleteOriginalsResult.Failed(firstFailure ?: "unknown error")
+                DeleteOriginalsResult.NeedsConsent(consent, uris, unresolved)
+            deleted > 0 ->
+                DeleteOriginalsResult.Deleted(deleted, unresolved)
+            else -> DeleteOriginalsResult.Failed(
+                firstFailure
+                    ?: if (unresolved > 0) {
+                        "original not found in your gallery"
+                    } else {
+                        "unknown error"
+                    }
+            )
         }
     }
 

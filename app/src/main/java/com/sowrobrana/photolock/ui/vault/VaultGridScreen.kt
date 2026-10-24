@@ -133,6 +133,43 @@ fun VaultGridScreen(
         }
     }
 
+    // Media-read gate (API 30+) for original removal: matching a picked
+    // item to its gallery row needs gallery read access (the system
+    // conversion alone fails on some Samsung devices). The removal is
+    // attempted whether the user grants or not — the permission only
+    // enables the match fallback.
+    var pendingMediaAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    val mediaPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { _ ->
+        pendingMediaAction?.invoke()
+        pendingMediaAction = null
+    }
+
+    fun withMediaReadPermission(action: () -> Unit) {
+        val perms = when {
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU ->
+                arrayOf(
+                    Manifest.permission.READ_MEDIA_IMAGES,
+                    Manifest.permission.READ_MEDIA_VIDEO
+                )
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.R ->
+                arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+            else -> emptyArray()
+        }
+        if (perms.isEmpty() || perms.all {
+                ContextCompat.checkSelfPermission(
+                    context, it
+                ) == PackageManager.PERMISSION_GRANTED
+            }
+        ) {
+            action()
+        } else {
+            pendingMediaAction = action
+            mediaPermissionLauncher.launch(perms)
+        }
+    }
+
     LaunchedEffect(viewModel) {
         viewModel.events.collect { event ->
             when (event) {
@@ -326,12 +363,15 @@ fun VaultGridScreen(
             confirmButton = {
                 TextButton(
                     onClick = {
-                        if (viewModel.needsLegacyWritePermission()) {
-                            withLegacyWritePermission {
+                        val confirm = {
+                            withMediaReadPermission {
                                 viewModel.onDeleteOriginalsConfirmed()
                             }
+                        }
+                        if (viewModel.needsLegacyWritePermission()) {
+                            withLegacyWritePermission { confirm() }
                         } else {
-                            viewModel.onDeleteOriginalsConfirmed()
+                            confirm()
                         }
                     }
                 ) { Text(stringResource(R.string.vault_remove_originals_yes)) }
