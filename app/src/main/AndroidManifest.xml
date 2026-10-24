@@ -20,6 +20,15 @@
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
+    <!--
+      Legacy only (API 26-28): writing/deleting shared media on those versions
+      needs WRITE_EXTERNAL_STORAGE. On API 29+ the app uses MediaStore with
+      the IS_PENDING flow and system consent dialogs instead, so the
+      permission is capped at API 28 and never requested on modern devices.
+    -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
 
     <application
         android:name=".PhotoLockApp"
