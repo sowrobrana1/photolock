@@ -501,18 +501,33 @@ class VaultRepository(
     private fun matchMediaStoreUri(uri: Uri): Uri? {
         val (name, size) = readPickedMeta(uri) ?: return null
         if (name.isNullOrEmpty() || size <= 0) return null
+        // Non-own rows first (the true original); own-package rows only
+        // as a last resort. The vault's own exports (viewer download
+        // button) ARE legitimate "originals" when the user re-imports
+        // an exported copy and asks to remove it from the gallery —
+        // excluding them outright made re-imported exports unresolvable
+        // ("name matches: 0, size matches: 0", seen 2026-10-24).
+        return tryMatch(uri, name, size, excludeOwn = true)
+            ?: tryMatch(uri, name, size, excludeOwn = false)
+    }
+
+    private fun tryMatch(
+        uri: Uri, name: String, size: Long, excludeOwn: Boolean
+    ): Uri? {
         // 1. Exact name + size, unique — the fast path.
         val exact = findCandidates(
             "${MediaStore.MediaColumns.DISPLAY_NAME} = ? " +
                 "AND ${MediaStore.MediaColumns.SIZE} = ?",
-            arrayOf(name, size.toString())
+            arrayOf(name, size.toString()),
+            excludeOwn
         )
         if (exact.size == 1) return exact[0].uri
         // 2. Same name (covers a stale SIZE row after an edit/resave):
         // verify by content, so duplicates resolve to the true original.
         val byName = findCandidates(
             "${MediaStore.MediaColumns.DISPLAY_NAME} = ?",
-            arrayOf(name)
+            arrayOf(name),
+            excludeOwn
         )
         for (c in byName) {
             if (contentMatches(uri, c.uri, size, c.rowSize)) return c.uri
@@ -520,7 +535,8 @@ class VaultRepository(
         // 3. Same size (covers a renamed file): verify by content.
         val bySize = findCandidates(
             "${MediaStore.MediaColumns.SIZE} = ?",
-            arrayOf(size.toString())
+            arrayOf(size.toString()),
+            excludeOwn
         ).take(MAX_SIZE_CANDIDATES)
         for (c in bySize) {
             if (contentMatches(uri, c.uri, size, c.rowSize)) return c.uri
@@ -531,10 +547,14 @@ class VaultRepository(
     /** A gallery row that might be the picked item's original. */
     private data class Candidate(val uri: Uri, val rowSize: Long)
 
-    /** Gallery rows (other apps' only) matching a MediaStore selection. */
+    /** Gallery rows matching a MediaStore selection. When [excludeOwn]
+     * is true, this app's own exports are skipped (they must never
+     * shadow a genuine original); pass false for the last-resort pass
+     * where an own export is the only candidate. */
     private fun findCandidates(
         selection: String,
-        args: Array<String>
+        args: Array<String>,
+        excludeOwn: Boolean = true
     ): List<Candidate> {
         val resolver = appContext.contentResolver
         val out = mutableListOf<Candidate>()
@@ -569,14 +589,16 @@ class VaultRepository(
                     val ownerIdx =
                         c.getColumnIndex(MediaStore.MediaColumns.OWNER_PACKAGE_NAME)
                     while (c.moveToNext()) {
-                        // Never match this app's own exports back to
-                        // itself — only genuine gallery originals count.
+                        // Own-package exports are skipped on the
+                        // default pass — only genuine gallery
+                        // originals count there (see matchMediaStoreUri
+                        // for the last-resort own-export pass).
                         val owner = if (ownerIdx >= 0) {
                             c.getString(ownerIdx)
                         } else {
                             null
                         }
-                        if (owner == appContext.packageName) continue
+                        if (excludeOwn && owner == appContext.packageName) continue
                         val rowSize = if (sizeIdx >= 0 && !c.isNull(sizeIdx)) {
                             c.getLong(sizeIdx)
                         } else {
@@ -718,13 +740,15 @@ class VaultRepository(
         val nameCount = runCatching {
             findCandidates(
                 "${MediaStore.MediaColumns.DISPLAY_NAME} = ?",
-                arrayOf(name)
+                arrayOf(name),
+                excludeOwn = false
             ).size
         }.getOrNull()
         val sizeCount = runCatching {
             findCandidates(
                 "${MediaStore.MediaColumns.SIZE} = ?",
-                arrayOf(size.toString())
+                arrayOf(size.toString()),
+                excludeOwn = false
             ).size
         }.getOrNull()
         if (nameCount == null || sizeCount == null) {
