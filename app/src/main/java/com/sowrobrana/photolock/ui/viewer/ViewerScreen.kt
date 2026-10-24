@@ -88,7 +88,12 @@ fun ViewerScreen(
     // mechanism VaultGridScreen uses for the post-import flow.
     val consentLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
-    ) { /* Result needs no handling: the system applies the user's choice. */ }
+    ) {
+        // Trash-consent results need no handling (the system applies the
+        // user's choice), but a delete-with-consent result must be retried
+        // by the ViewModel — it no-ops when nothing is pending.
+        viewModel.onConsentDialogFinished()
+    }
 
     LaunchedEffect(viewModel) {
         viewModel.messages.collect { snackbarHostState.showSnackbar(it) }

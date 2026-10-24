@@ -5,6 +5,7 @@ import android.net.Uri
 import android.os.Build
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.sowrobrana.photolock.data.DeleteOriginalsResult
 import com.sowrobrana.photolock.data.VaultFolder
 import com.sowrobrana.photolock.data.VaultItem
 import com.sowrobrana.photolock.data.VaultRepository
@@ -59,6 +60,8 @@ sealed interface VaultEvent {
  * Originals are NEVER deleted silently: on API 30+ the system trash dialog
  * is launched; on API 29 the recoverable-security consent intent is
  * launched; on API 26–28 the UI requests the legacy write permission first.
+ * If the API 30+ consent request cannot be built, a direct delete with a
+ * consent retry is attempted instead, and the failure reason is reported.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class VaultViewModel(
@@ -78,6 +81,9 @@ class VaultViewModel(
 
     /** Set when API 29 consent was launched and deletes must be retried. */
     private var retryLegacyDeleteAfterConsent = false
+
+    /** Set when a delete-with-consent intent was launched (API 30+ fallback). */
+    private var retryConsentDeleteAfterConsent = false
 
     private val itemsFlow = internal
         .map { it.filter }
@@ -196,14 +202,36 @@ class VaultViewModel(
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             // API 30+ but the system consent request could not be built —
-            // never fail silently; the originals are still in the gallery.
-            internal.update { it.copy(pendingOriginals = emptyList()) }
-            _events.tryEmit(
-                VaultEvent.Message(
-                    "Could not remove the originals automatically — " +
-                        "they are still in your gallery app"
-                )
-            )
+            // fall back to the direct-delete path (system consent dialog
+            // if the system demands one); never fail silently, and report
+            // the actual failure reason when nothing could be removed.
+            viewModelScope.launch {
+                when (val result = repository.deleteOriginalsWithConsent(uris)) {
+                    is DeleteOriginalsResult.Deleted -> {
+                        internal.update { it.copy(pendingOriginals = emptyList()) }
+                        _events.tryEmit(
+                            VaultEvent.Message("Originals removed from your gallery")
+                        )
+                    }
+                    is DeleteOriginalsResult.NeedsConsent -> {
+                        retryConsentDeleteAfterConsent = true
+                        internal.update {
+                            it.copy(pendingOriginals = result.remainingUris)
+                        }
+                        _events.tryEmit(VaultEvent.LaunchIntentSender(result.intent))
+                    }
+                    is DeleteOriginalsResult.Failed -> {
+                        internal.update { it.copy(pendingOriginals = emptyList()) }
+                        _events.tryEmit(
+                            VaultEvent.Message(
+                                "Could not remove the originals " +
+                                    "(${result.reason}) — please delete them " +
+                                    "from your gallery app"
+                            )
+                        )
+                    }
+                }
+            }
             return
         }
         // API 26–29 legacy path.
@@ -228,14 +256,44 @@ class VaultViewModel(
 
     /** A launched consent dialog finished (any result). */
     fun onConsentDialogFinished() {
-        if (!retryLegacyDeleteAfterConsent) return
+        val legacyRetry = retryLegacyDeleteAfterConsent
+        val consentRetry = retryConsentDeleteAfterConsent
+        if (!legacyRetry && !consentRetry) return
         retryLegacyDeleteAfterConsent = false
+        retryConsentDeleteAfterConsent = false
         val uris = internal.value.pendingOriginals
         internal.update { it.copy(pendingOriginals = emptyList()) }
         if (uris.isEmpty()) return
         viewModelScope.launch {
             // Best-effort second pass now that consent was (maybe) granted.
-            repository.deleteOriginalsLegacy(uris)
+            if (legacyRetry) repository.deleteOriginalsLegacy(uris)
+            if (consentRetry) {
+                when (val result = repository.deleteOriginalsWithConsent(uris)) {
+                    is DeleteOriginalsResult.Deleted -> {
+                        _events.tryEmit(
+                            VaultEvent.Message("Originals removed from your gallery")
+                        )
+                    }
+                    is DeleteOriginalsResult.NeedsConsent -> {
+                        // One extra consent round; the user taps each time,
+                        // so this cannot loop on its own.
+                        retryConsentDeleteAfterConsent = true
+                        internal.update {
+                            it.copy(pendingOriginals = result.remainingUris)
+                        }
+                        _events.tryEmit(VaultEvent.LaunchIntentSender(result.intent))
+                    }
+                    is DeleteOriginalsResult.Failed -> {
+                        _events.tryEmit(
+                            VaultEvent.Message(
+                                "Could not remove the originals " +
+                                    "(${result.reason}) — please delete them " +
+                                    "from your gallery app"
+                            )
+                        )
+                    }
+                }
+            }
         }
     }
 

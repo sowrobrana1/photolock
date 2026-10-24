@@ -69,6 +69,21 @@ data class VaultItem(
     val isImage: Boolean get() = mimeType.startsWith("image/")
 }
 
+/**
+ * Outcome of [VaultRepository.deleteOriginalsWithConsent]: the originals
+ * are gone, the system wants a consent dialog first (retry the
+ * [remainingUris] afterwards), or every delete failed ([reason] carries
+ * the first exception, for display to the user).
+ */
+sealed interface DeleteOriginalsResult {
+    data class Deleted(val count: Int) : DeleteOriginalsResult
+    data class NeedsConsent(
+        val intent: PendingIntent,
+        val remainingUris: List<Uri>
+    ) : DeleteOriginalsResult
+    data class Failed(val reason: String) : DeleteOriginalsResult
+}
+
 /** A user-created folder inside the vault. */
 data class VaultFolder(
     val id: String,
@@ -451,7 +466,8 @@ class VaultRepository(
      * are rejected by the MediaStore APIs). If the trash request cannot
      * be built, a [MediaStore.createDeleteRequest] (permanent delete,
      * still behind the system consent dialog) is tried as a fallback;
-     * null is returned only when both fail.
+     * null is returned only when both fail — callers then fall back to
+     * [deleteOriginalsWithConsent], the third step of the chain.
      *
      * Returns null below API 30 — use [deleteOriginalsLegacy] there.
      */
@@ -465,6 +481,51 @@ class VaultRepository(
         }.getOrNull() ?: runCatching {
             MediaStore.createDeleteRequest(resolver, mediaUris)
         }.getOrNull()
+    }
+
+    /**
+     * Third-step removal path, used when BOTH system consent requests
+     * above fail to build (seen on some Samsung devices, where trash and
+     * delete requests reject even converted MediaStore URIs for reasons
+     * the system does not disclose). Deletes directly via
+     * [ContentResolver.delete] on the converted URIs: when the system
+     * demands user consent it throws [RecoverableSecurityException],
+     * whose user-action intent the UI launches, after which the caller
+     * retries the remaining URIs. Unlike the consent-request paths this
+     * one also reports WHY it failed, so the user can relay the exact
+     * reason instead of a generic "could not remove" message.
+     */
+    suspend fun deleteOriginalsWithConsent(
+        uris: List<Uri>
+    ): DeleteOriginalsResult = withContext(Dispatchers.IO) {
+        val resolver = appContext.contentResolver
+        val mediaUris = uris.map { toMediaStoreUri(it) }
+        var deleted = 0
+        var consent: PendingIntent? = null
+        var remaining: List<Uri> = emptyList()
+        var firstFailure: String? = null
+        for ((index, uri) in mediaUris.withIndex()) {
+            try {
+                if (resolver.delete(uri, null, null) > 0) deleted++
+            } catch (e: RecoverableSecurityException) {
+                if (consent == null) {
+                    consent = e.userAction.actionIntent
+                    remaining = mediaUris.subList(index, mediaUris.size)
+                }
+                break
+            } catch (e: Exception) {
+                if (firstFailure == null) {
+                    firstFailure = e.javaClass.simpleName +
+                        (e.message?.let { ": $it" } ?: "")
+                }
+            }
+        }
+        when {
+            consent != null ->
+                DeleteOriginalsResult.NeedsConsent(consent, remaining)
+            deleted > 0 -> DeleteOriginalsResult.Deleted(deleted)
+            else -> DeleteOriginalsResult.Failed(firstFailure ?: "unknown error")
+        }
     }
 
     /**

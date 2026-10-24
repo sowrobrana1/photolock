@@ -6,6 +6,7 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.sowrobrana.photolock.data.DeleteOriginalsResult
 import com.sowrobrana.photolock.data.VaultItem
 import com.sowrobrana.photolock.data.VaultRepository
 import java.io.File
@@ -62,6 +63,9 @@ class ViewerViewModel(
     val consentRequests: SharedFlow<PendingIntent> =
         _consentRequests.asSharedFlow()
 
+    /** Original awaiting a delete-with-consent retry after its dialog. */
+    private var pendingConsentDeleteUri: Uri? = null
+
     init {
         viewModelScope.launch {
             val item = repository.getItem(itemId)
@@ -113,18 +117,57 @@ class ViewerViewModel(
      * item's source MediaStore URI was recorded at import): builds the
      * same system trash-consent request as the post-import flow and asks
      * the screen to launch it. Never deletes silently — if the request
-     * cannot be built, the user is told instead.
+     * cannot be built, the direct-delete fallback runs instead, and if
+     * that fails too the user is told the actual reason.
      */
     fun removeOriginalFromGallery() {
         val item = _state.value.item ?: return
         val stored = item.sourceMediaUri ?: return
-        val request = repository.buildOriginalsRemovalRequest(
-            listOf(Uri.parse(stored))
-        )
+        val uri = Uri.parse(stored)
+        val request = repository.buildOriginalsRemovalRequest(listOf(uri))
         if (request != null) {
             _consentRequests.tryEmit(request)
-        } else {
-            _messages.tryEmit("Could not remove the original from your gallery")
+            return
+        }
+        viewModelScope.launch {
+            when (val result = repository.deleteOriginalsWithConsent(listOf(uri))) {
+                is DeleteOriginalsResult.Deleted ->
+                    _messages.tryEmit("Original removed from your gallery")
+                is DeleteOriginalsResult.NeedsConsent -> {
+                    pendingConsentDeleteUri = result.remainingUris.firstOrNull()
+                    _consentRequests.tryEmit(result.intent)
+                }
+                is DeleteOriginalsResult.Failed ->
+                    _messages.tryEmit(
+                        "Could not remove the original " +
+                            "(${result.reason}) — please delete it " +
+                            "from your gallery app"
+                    )
+            }
+        }
+    }
+
+    /** A launched delete-with-consent dialog finished (any result). */
+    fun onConsentDialogFinished() {
+        val uri = pendingConsentDeleteUri ?: return
+        pendingConsentDeleteUri = null
+        viewModelScope.launch {
+            when (val result = repository.deleteOriginalsWithConsent(listOf(uri))) {
+                is DeleteOriginalsResult.Deleted ->
+                    _messages.tryEmit("Original removed from your gallery")
+                is DeleteOriginalsResult.NeedsConsent -> {
+                    // One extra consent round; the user taps each time,
+                    // so this cannot loop on its own.
+                    pendingConsentDeleteUri = result.remainingUris.firstOrNull()
+                    _consentRequests.tryEmit(result.intent)
+                }
+                is DeleteOriginalsResult.Failed ->
+                    _messages.tryEmit(
+                        "Could not remove the original " +
+                            "(${result.reason}) — please delete it " +
+                            "from your gallery app"
+                    )
+            }
         }
     }
 
