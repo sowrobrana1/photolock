@@ -48,7 +48,13 @@ data class VaultItemEntity(
     val thumbnailFileName: String?,
     val importedAtEpochMs: Long,
     /** Video duration when known (from MediaMetadataRetriever at import). */
-    val durationMs: Long? = null
+    val durationMs: Long? = null,
+    /**
+     * MediaStore URI (string form) of the gallery original, recorded at
+     * import so the original can be removed later from the viewer.
+     * Null for items imported before schema v2.
+     */
+    val sourceMediaUri: String? = null
 )
 
 /**
@@ -77,7 +83,8 @@ fun VaultItemEntity.toDomain(): VaultItem = VaultItem(
     encryptedFileName = encryptedFileName,
     thumbnailFileName = thumbnailFileName,
     importedAtEpochMs = importedAtEpochMs,
-    durationMs = durationMs
+    durationMs = durationMs,
+    sourceMediaUri = sourceMediaUri
 )
 
 fun BreakInLogEntity.toDomain(): BreakInAttempt = BreakInAttempt(

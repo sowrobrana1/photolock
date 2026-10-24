@@ -194,6 +194,18 @@ class VaultViewModel(
             _events.tryEmit(VaultEvent.LaunchIntentSender(request))
             return
         }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // API 30+ but the system consent request could not be built —
+            // never fail silently; the originals are still in the gallery.
+            internal.update { it.copy(pendingOriginals = emptyList()) }
+            _events.tryEmit(
+                VaultEvent.Message(
+                    "Could not remove the originals automatically — " +
+                        "they are still in your gallery app"
+                )
+            )
+            return
+        }
         // API 26–29 legacy path.
         viewModelScope.launch {
             val consent = repository.deleteOriginalsLegacy(uris)

@@ -1,7 +1,9 @@
 package com.sowrobrana.photolock.ui.viewer
 
+import android.app.PendingIntent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.sowrobrana.photolock.data.VaultItem
@@ -54,6 +56,12 @@ class ViewerViewModel(
     private val _deleted = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val deleted: SharedFlow<Unit> = _deleted.asSharedFlow()
 
+    /** MediaStore consent requests the screen must launch (system dialog). */
+    private val _consentRequests =
+        MutableSharedFlow<PendingIntent>(extraBufferCapacity = 1)
+    val consentRequests: SharedFlow<PendingIntent> =
+        _consentRequests.asSharedFlow()
+
     init {
         viewModelScope.launch {
             val item = repository.getItem(itemId)
@@ -97,6 +105,26 @@ class ViewerViewModel(
             runCatching { repository.exportItem(item) }
                 .onSuccess { _messages.tryEmit("Exported to your gallery") }
                 .onFailure { _messages.tryEmit("Export failed") }
+        }
+    }
+
+    /**
+     * "Remove original from gallery" (menu action, shown only when the
+     * item's source MediaStore URI was recorded at import): builds the
+     * same system trash-consent request as the post-import flow and asks
+     * the screen to launch it. Never deletes silently — if the request
+     * cannot be built, the user is told instead.
+     */
+    fun removeOriginalFromGallery() {
+        val item = _state.value.item ?: return
+        val stored = item.sourceMediaUri ?: return
+        val request = repository.buildOriginalsRemovalRequest(
+            listOf(Uri.parse(stored))
+        )
+        if (request != null) {
+            _consentRequests.tryEmit(request)
+        } else {
+            _messages.tryEmit("Could not remove the original from your gallery")
         }
     }
 

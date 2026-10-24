@@ -55,7 +55,15 @@ data class VaultItem(
     val thumbnailFileName: String? = null,
     val importedAtEpochMs: Long,
     /** Video duration when known (from MediaMetadataRetriever at import). */
-    val durationMs: Long? = null
+    val durationMs: Long? = null,
+    /**
+     * MediaStore URI of the gallery original this item was imported from
+     * (converted from the Photo Picker URI at import — see
+     * [VaultRepository.toMediaStoreUri]), or null when unknown (items
+     * imported before this was recorded). Used only by the explicit
+     * "remove original from gallery" action.
+     */
+    val sourceMediaUri: String? = null
 ) {
     val isVideo: Boolean get() = mimeType.startsWith("video/")
     val isImage: Boolean get() = mimeType.startsWith("image/")
@@ -215,7 +223,8 @@ class VaultRepository(
                     encryptedFileName = blobName,
                     thumbnailFileName = if (thumbOk) thumbName else null,
                     importedAtEpochMs = System.currentTimeMillis(),
-                    durationMs = durationMs
+                    durationMs = durationMs,
+                    sourceMediaUri = toMediaStoreUri(sourceUri).toString()
                 )
                 itemDao.insert(entity)
                 entity.toDomain()
@@ -416,6 +425,21 @@ class VaultRepository(
     // ------------------------------------------------- delete original files
 
     /**
+     * Converts a Photo Picker URI (`content://media/picker/...`) into the
+     * MediaStore URI for the same item. Picker URIs identify the item only
+     * inside the picker grant — the MediaStore consent APIs
+     * (createTrashRequest / createDeleteRequest) cannot operate on them
+     * and fail, which is why originals silently stayed in the gallery.
+     * [MediaStore.getMediaUri] (API 33+) performs the conversion; below
+     * API 33, or when conversion fails, the URI is returned unchanged.
+     */
+    fun toMediaStoreUri(uri: Uri): Uri {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return uri
+        return runCatching { MediaStore.getMediaUri(appContext, uri) }
+            .getOrNull() ?: uri
+    }
+
+    /**
      * Builds the SYSTEM consent request for removing the original gallery
      * files at [uris] after import. On API 30+ this is a
      * [MediaStore.createTrashRequest] PendingIntent (recoverable trash —
@@ -423,16 +447,24 @@ class VaultRepository(
      * system shows the dialog naming the files. The app cannot and must
      * not delete silently.
      *
+     * Every URI is first converted with [toMediaStoreUri] (picker URIs
+     * are rejected by the MediaStore APIs). If the trash request cannot
+     * be built, a [MediaStore.createDeleteRequest] (permanent delete,
+     * still behind the system consent dialog) is tried as a fallback;
+     * null is returned only when both fail.
+     *
      * Returns null below API 30 — use [deleteOriginalsLegacy] there.
      */
     fun buildOriginalsRemovalRequest(uris: List<Uri>): PendingIntent? {
         if (uris.isEmpty()) return null
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
-        return MediaStore.createTrashRequest(
-            appContext.contentResolver,
-            uris,
-            true
-        )
+        val mediaUris = uris.map { toMediaStoreUri(it) }
+        val resolver = appContext.contentResolver
+        return runCatching {
+            MediaStore.createTrashRequest(resolver, mediaUris, true)
+        }.getOrNull() ?: runCatching {
+            MediaStore.createDeleteRequest(resolver, mediaUris)
+        }.getOrNull()
     }
 
     /**

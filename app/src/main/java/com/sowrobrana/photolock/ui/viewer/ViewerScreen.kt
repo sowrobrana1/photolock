@@ -1,6 +1,9 @@
 package com.sowrobrana.photolock.ui.viewer
 
 import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -13,8 +16,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -76,9 +82,23 @@ fun ViewerScreen(
     val state by viewModel.state.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     var showDeleteConfirm by remember { mutableStateOf(false) }
+    var showMenu by remember { mutableStateOf(false) }
+
+    // Launches the MediaStore trash-consent dialog (system UI) — the same
+    // mechanism VaultGridScreen uses for the post-import flow.
+    val consentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { /* Result needs no handling: the system applies the user's choice. */ }
 
     LaunchedEffect(viewModel) {
         viewModel.messages.collect { snackbarHostState.showSnackbar(it) }
+    }
+    LaunchedEffect(viewModel) {
+        viewModel.consentRequests.collect { pendingIntent ->
+            consentLauncher.launch(
+                IntentSenderRequest.Builder(pendingIntent.intentSender).build()
+            )
+        }
     }
     LaunchedEffect(viewModel) {
         viewModel.deleted.collect { onBack() }
@@ -153,6 +173,38 @@ fun ViewerScreen(
                             contentDescription = stringResource(R.string.action_delete),
                             tint = Color.White
                         )
+                    }
+                    // Overflow menu — only when this item's gallery
+                    // original is known (recorded at import).
+                    if (state.item?.sourceMediaUri != null) {
+                        Box {
+                            IconButton(onClick = { showMenu = true }) {
+                                Icon(
+                                    imageVector = Icons.Filled.MoreVert,
+                                    contentDescription =
+                                        stringResource(R.string.viewer_more_actions),
+                                    tint = Color.White
+                                )
+                            }
+                            DropdownMenu(
+                                expanded = showMenu,
+                                onDismissRequest = { showMenu = false }
+                            ) {
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            stringResource(
+                                                R.string.viewer_remove_original
+                                            )
+                                        )
+                                    },
+                                    onClick = {
+                                        showMenu = false
+                                        viewModel.removeOriginalFromGallery()
+                                    }
+                                )
+                            }
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
