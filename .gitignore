@@ -1,0 +1,20 @@
+# Gradle
+.gradle/
+build/
+
+# Android
+*/build/
+local.properties
+*.iml
+
+# IDE
+.idea/
+.vscode/
+
+# Signing — NEVER commit keystores or passwords
+*.jks
+*.keystore
+keystore.properties
+
+# OS
+.DS_Store

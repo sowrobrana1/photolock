@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Biometric unlock (fingerprint / face). -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+
+    <!--
+      Reading the user's own gallery for import.
+      Primary path on Android 13+ is the system Photo Picker
+      (ActivityResultContracts.PickVisualMedia), which needs NO permission.
+      These permissions are the fallback for in-app browsing on older flows:
+        - READ_MEDIA_IMAGES / READ_MEDIA_VIDEO: Android 13+ (API 33+)
+        - READ_EXTERNAL_STORAGE: Android 12L and below (capped at API 32)
+      Deleting originals after import is NEVER done silently — it always goes
+      through MediaStore.createDeleteRequest / createTrashRequest so the
+      system shows its own consent dialog (see PLAN.md, scoped storage).
+    -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+
+    <application
+        android:name=".PhotoLockApp"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.PhotoLock">
+
+        <!--
+          allowBackup="false" on purpose: vault blobs are useless without the
+          Keystore key (which never leaves the device), and we do not want
+          encrypted user media silently copied into cloud backups.
+        -->
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
+            android:theme="@style/Theme.PhotoLock"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+    </application>
+
+</manifest>

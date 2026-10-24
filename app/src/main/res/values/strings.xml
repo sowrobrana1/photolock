@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PhotoLock</string>
+
+    <!-- Lock screen -->
+    <string name="lock_title">PhotoLock</string>
+    <string name="lock_enter_pin">Enter your PIN</string>
+    <string name="lock_use_biometric">Use fingerprint</string>
+    <string name="lock_delete_digit">Delete</string>
+
+    <!-- Vault -->
+    <string name="vault_title">My Vault</string>
+    <string name="vault_empty_title">Your vault is empty</string>
+    <string name="vault_empty_body">Tap + to import photos and videos from your gallery. They stay encrypted on this device only.</string>
+    <string name="vault_import">Import</string>
+
+    <!-- Settings -->
+    <string name="settings_title">Settings</string>
+    <string name="settings_change_pin">Change PIN</string>
+    <string name="settings_biometric">Biometric unlock</string>
+    <string name="settings_biometric_summary">Unlock with fingerprint or face</string>
+    <string name="settings_break_in_log">Break-in attempt log</string>
+    <string name="settings_break_in_log_summary">Stored on this device only — never uploaded</string>
+    <string name="settings_about">About PhotoLock</string>
+</resources>

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Base application theme. The UI itself is Jetpack Compose (Material 3);
+         this only styles the window chrome around it. -->
+    <style name="Theme.PhotoLock" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>
